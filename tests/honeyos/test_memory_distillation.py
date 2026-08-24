@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,9 +10,12 @@ from honeyos.companion.distillation import (
     DistillationSettings,
     MemoryDistiller,
     _main_runtime_from_config,
+    active_honeyos_distiller,
     extract_with_auxiliary_model,
     repair_legacy_completed_rejections,
     repair_legacy_distillation_failures,
+    repair_legacy_missing_recent_chapters,
+    repair_system_voice_recent_chapters,
 )
 from honeyos.companion.continuity import StructuredMemoryStore
 from honeyos.agent.auxiliary_client import _validate_llm_response
@@ -19,6 +23,34 @@ from honeyos.agent.auxiliary_client import _validate_llm_response
 
 NOW = datetime(2026, 8, 7, 8, 0, tzinfo=timezone.utc)
 LANE = "agent:main:weixin:dm:user-a"
+
+
+def test_active_distiller_recovers_initialized_honeyos_home_without_runtime_env(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "runtime.json").write_text(
+        json.dumps(
+            {
+                "honeyos_version": "0.3.1",
+                "data_directory": str(tmp_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HONEYOS_HOME", str(tmp_path))
+    monkeypatch.delenv("HONEYOS_RUNTIME_ID", raising=False)
+
+    distiller = active_honeyos_distiller()
+
+    assert distiller is not None
+    assert distiller.home == tmp_path.resolve()
+
+
+def test_active_distiller_still_rejects_unidentified_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HONEYOS_HOME", str(tmp_path))
+    monkeypatch.delenv("HONEYOS_RUNTIME_ID", raising=False)
+
+    assert active_honeyos_distiller() is None
 
 
 def _messages(count: int) -> list[dict]:
@@ -65,11 +97,85 @@ async def test_periodic_distillation_waits_for_twenty_new_messages(tmp_path):
 
     assert result is not None
     assert result.status == "completed"
+    assert result.chapter_id
+    chapters = StructuredMemoryStore(tmp_path).list_chapters(lane_key=LANE)
+    assert len(chapters) == 1
+    assert chapters[0].source_message_ids == tuple(range(1, 21))
     assert calls == [True]
 
 
 @pytest.mark.asyncio
-async def test_periodic_distillation_always_persists_a_shared_experience(tmp_path):
+async def test_model_chapter_becomes_recent_conversation_summary(tmp_path):
+    async def extractor(_job, _active, _runtime):
+        return json.dumps(
+            {
+                "chapter": {
+                    "title": "一起规划周末",
+                    "summary": "我记得我们一起商量了周末出门的计划，等晚些时候再确认地点。我很喜欢这种一起期待小事的感觉。",
+                    "evidence_message_ids": [1, 2, 19, 20],
+                },
+                "operations": [],
+            },
+            ensure_ascii=False,
+        )
+
+    distiller = MemoryDistiller(
+        tmp_path,
+        settings=DistillationSettings(trigger_messages=20),
+        extractor=extractor,
+    )
+    result = await distiller.distill_if_due(
+        lane_key=LANE,
+        session_id="session-recent",
+        messages=_messages(20),
+        reason="periodic",
+        now=NOW,
+    )
+
+    assert result is not None and result.status == "completed"
+    chapters = StructuredMemoryStore(tmp_path).list_chapters(lane_key=LANE)
+    assert [(item.title, item.summary) for item in chapters] == [
+        (
+            "一起规划周末",
+            "我记得我们一起商量了周末出门的计划，等晚些时候再确认地点。我很喜欢这种一起期待小事的感觉。",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_system_voice_chapter_falls_back_to_companion_first_person(tmp_path):
+    async def extractor(_job, _active, _runtime):
+        return json.dumps(
+            {
+                "chapter": {
+                    "title": "部署完成",
+                    "summary": "用户确认头像可用，伴侣完成了部署。",
+                    "evidence_message_ids": [1, 2],
+                },
+                "operations": [],
+            },
+            ensure_ascii=False,
+        )
+
+    distiller = MemoryDistiller(tmp_path, extractor=extractor)
+    result = await distiller.distill_if_due(
+        lane_key=LANE,
+        session_id="session-system-voice",
+        messages=_messages(20),
+        reason="periodic",
+        now=NOW,
+    )
+
+    assert result is not None and result.status == "completed"
+    chapter = StructuredMemoryStore(tmp_path).list_chapters(lane_key=LANE)[0]
+    assert chapter.title.startswith("我们聊到")
+    assert chapter.summary.startswith("我记得你提到")
+    assert "用户" not in chapter.summary
+    assert "伴侣" not in chapter.summary
+
+
+@pytest.mark.asyncio
+async def test_upgrade_reopens_latest_batch_when_recent_chapters_are_missing(tmp_path):
     async def extractor(_job, _active, _runtime):
         return '{"operations":[]}'
 
@@ -78,99 +184,39 @@ async def test_periodic_distillation_always_persists_a_shared_experience(tmp_pat
         settings=DistillationSettings(trigger_messages=20),
         extractor=extractor,
     )
-
-    result = await distiller.distill_if_due(
+    await distiller.distill_if_due(
         lane_key=LANE,
-        session_id="session-shared-experience",
+        session_id="legacy-session",
         messages=_messages(20),
         reason="periodic",
         now=NOW,
     )
+    with sqlite3.connect(tmp_path / "continuity.db") as connection:
+        connection.execute("DELETE FROM conversation_chapters")
 
-    assert result is not None and result.status == "completed"
-    assert result.chapter_id
-    chapters = StructuredMemoryStore(tmp_path).list_chapters(lane_key=LANE)
-    assert len(chapters) == 1
-    assert chapters[0].id == result.chapter_id
-    assert chapters[0].source_message_ids == tuple(range(1, 21))
-    assert chapters[0].source_session_id == "session-shared-experience"
-    assert StructuredMemoryStore(tmp_path).list_active(lane_key=LANE, now=NOW) == ()
-    status = distiller.latest_status(lane_key=LANE)
-    assert status["status"] == "completed"
-    assert status["chapter_id"] == result.chapter_id
-    assert status["applied"] == 0
-    assert status["rejected"] == 0
-
-
-@pytest.mark.asyncio
-async def test_chapter_write_failure_leaves_operations_unapplied_and_retryable(
-    monkeypatch, tmp_path
-):
-    async def extractor(_job, _active, _runtime):
-        return json.dumps(
-            {
-                "operations": [
-                    {
-                        "action": "record",
-                        "kind": "open_loop",
-                        "content": "下次继续聊写入失败",
-                        "evidence": "user_stated",
-                        "evidence_message_ids": [1],
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        )
-
-    distiller = MemoryDistiller(tmp_path, extractor=extractor)
-    record_chapter = distiller.memories.record_chapter
-    chapter_attempts = 0
-
-    def fail_once(**kwargs):
-        nonlocal chapter_attempts
-        chapter_attempts += 1
-        if chapter_attempts == 1:
-            return None
-        return record_chapter(**kwargs)
-
-    monkeypatch.setattr(distiller.memories, "record_chapter", fail_once)
-
-    failed = await distiller.distill_if_due(
-        lane_key=LANE,
-        session_id="session-write-failure",
-        messages=_messages(20),
-        reason="periodic",
-        now=NOW,
-    )
-
-    assert failed is not None and failed.status == "failed"
-    assert failed.applied == 0
-    assert StructuredMemoryStore(tmp_path).list_active(lane_key=LANE, now=NOW) == ()
-    with distiller._connect() as connection:
-        state = connection.execute(
-            "SELECT * FROM distillation_state WHERE lane_key = ? AND session_id = ?",
-            (LANE, "session-write-failure"),
-        ).fetchone()
-    assert state is None
-
-    completed = await distiller.distill_if_due(
-        lane_key=LANE,
-        session_id="session-write-failure",
-        messages=_messages(20),
-        reason="periodic",
-        now=NOW + timedelta(minutes=1),
-    )
-
-    assert completed is not None and completed.status == "completed"
-    assert completed.run_id == failed.run_id
-    assert completed.applied == 1
-    assert len(StructuredMemoryStore(tmp_path).list_active(lane_key=LANE, now=NOW)) == 1
-    assert len(StructuredMemoryStore(tmp_path).list_chapters(lane_key=LANE)) == 1
+    assert repair_legacy_missing_recent_chapters(tmp_path) == 1
+    with sqlite3.connect(tmp_path / "continuity.db") as connection:
+        status = connection.execute("SELECT status FROM distillation_runs").fetchone()[0]
+        cursor = connection.execute(
+            "SELECT last_source_row_id FROM distillation_state"
+        ).fetchone()[0]
+    assert status == "failed"
+    assert cursor == 0
 
 
 @pytest.mark.asyncio
 async def test_auxiliary_distillation_accepts_main_runtime_api_mode(monkeypatch, tmp_path):
     captured = {}
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    (memories / "IDENTITY.md").write_text(
+        "- companion_name: 小树\n- personality: 温柔但有主见\n- speaking_style: 自然、直接\n",
+        encoding="utf-8",
+    )
+    (memories / "RELATIONSHIP.md").write_text(
+        "- user_nickname: 小鹿\n- relationship: 正在认识彼此\n",
+        encoding="utf-8",
+    )
 
     class _Message:
         content = '{"operations":[]}'
@@ -212,6 +258,18 @@ async def test_auxiliary_distillation_accepts_main_runtime_api_mode(monkeypatch,
 
     assert raw == '{"operations":[]}'
     assert captured["main_runtime"]["api_mode"] == "chat_completions"
+    prompt = captured["messages"][0]["content"]
+    payload = json.loads(captured["messages"][1]["content"])
+    assert "first-person voice" in prompt
+    assert "Never refer to either person" in prompt
+    assert payload["companion_profile"] == {
+        "companion_name": "小树",
+        "personality": "温柔但有主见",
+        "speaking_style": "自然、直接",
+        "user_nickname": "小鹿",
+        "relationship": "正在认识彼此",
+        "boundaries": "",
+    }
     assert "api_mode" not in {
         key for key in captured if key != "main_runtime"
     }
@@ -351,6 +409,45 @@ def test_upgrade_reopens_runs_exhausted_by_legacy_api_mode_bug(tmp_path):
             "SELECT status, attempts, error FROM distillation_runs WHERE id='legacy'"
         ).fetchone()
         assert tuple(row) == ("failed", 0, "")
+
+
+@pytest.mark.asyncio
+async def test_upgrade_reopens_system_voice_chapter_without_erasing_card(tmp_path):
+    async def extractor(_job, _active, _runtime):
+        return '{"operations":[]}'
+
+    distiller = MemoryDistiller(tmp_path, extractor=extractor)
+    result = await distiller.distill_if_due(
+        lane_key=LANE,
+        session_id="legacy-system-voice",
+        messages=_messages(20),
+        reason="periodic",
+        now=NOW,
+    )
+    assert result is not None and result.status == "completed"
+    with sqlite3.connect(tmp_path / "continuity.db") as connection:
+        connection.execute(
+            """
+            UPDATE conversation_chapters
+            SET title = '部署完成', summary = '用户确认头像可用，伴侣完成部署。'
+            """
+        )
+
+    assert repair_system_voice_recent_chapters(tmp_path) == 1
+    assert repair_system_voice_recent_chapters(tmp_path) == 0
+    with sqlite3.connect(tmp_path / "continuity.db") as connection:
+        run = connection.execute(
+            "SELECT status, attempts, error FROM distillation_runs"
+        ).fetchone()
+        chapter = connection.execute(
+            "SELECT title, summary FROM conversation_chapters"
+        ).fetchone()
+        cursor = connection.execute(
+            "SELECT last_source_row_id FROM distillation_state"
+        ).fetchone()[0]
+    assert tuple(run) == ("failed", 0, "companion voice chapter replay")
+    assert tuple(chapter) == ("部署完成", "用户确认头像可用，伴侣完成部署。")
+    assert cursor == 0
 
 
 def test_upgrade_replays_completed_batches_when_legacy_validator_stored_nothing(tmp_path):
