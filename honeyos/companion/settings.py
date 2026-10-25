@@ -77,6 +77,13 @@ def companion_settings(home: Path | str) -> dict[str, Any]:
         or provider_cfg.get("api_key")
     )
 
+    if provider == "openai-codex":
+        try:
+            from honeyos.runtime.auth import get_codex_auth_status
+            model_key_configured = bool(get_codex_auth_status().get("logged_in"))
+        except Exception:
+            model_key_configured = False
+
     feishu_app_id = str(env.get("FEISHU_APP_ID") or "").strip()
     feishu_secret_configured = bool(env.get("FEISHU_APP_SECRET"))
     weixin_account_id = str(env.get("WEIXIN_ACCOUNT_ID") or "").strip()
