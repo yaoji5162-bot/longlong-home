@@ -25,3 +25,11 @@ The original text and credentials remain unchanged.
 Verification: `python -m unittest discover -s tests/companion -p test_time_context.py`;
 inside frontend: `npm test` and `npm run build`. The committed react_dist build lets
 the phone pull this update without installing Node or rebuilding the frontend.
+
+## Minimal Android/proot environments
+
+If both the system IANA database and Python tzdata package are absent, the
+companion clock falls back to modern Beijing time (UTC+08:00), keeping the
+Asia/Shanghai UI identifier. Bootstrap stays available without installing
+packages. This fixed-offset fallback does not supply historical Shanghai DST
+rules; use full tzdata for historical timezone calculations or other IANA zones.

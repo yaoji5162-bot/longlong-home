@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 
@@ -28,7 +28,18 @@ def message_epoch(value):
 def companion_timezone():
     # Explicit user configuration wins; a proot host's accidental UTC does not.
     from honeyos.core.time import get_timezone
-    return get_timezone() or ZoneInfo(DEFAULT_TIMEZONE)
+    configured = get_timezone()
+    if configured is not None:
+        return configured
+    try:
+        return ZoneInfo(DEFAULT_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        # Minimal Ubuntu/proot and standalone Python may have neither system
+        # tzdata nor the Python tzdata package. Modern Shanghai uses UTC+08:00;
+        # keep the IANA display name so the browser's Intl formatter accepts it.
+        # This fallback is for the current companion clock, not historical
+        # timezone-rule conversion (Shanghai had DST before 1992).
+        return timezone(timedelta(hours=8), name=DEFAULT_TIMEZONE)
 
 
 def build_time_note(history, *, current, received=None):
