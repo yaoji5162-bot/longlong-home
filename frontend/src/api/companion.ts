@@ -1,6 +1,6 @@
 import { apiPath, requestJson } from "./client";
 
-export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type ChatMessage = { role: "user" | "assistant"; content: string; timestamp?: number | null };
 
 export type CompanionProfileDetails = CompanionBootstrap["profile_details"];
 
@@ -35,6 +35,7 @@ export type HistoryItem = {
 };
 
 export type CompanionBootstrap = {
+  timezone?: string;
   profile: { name?: string; status?: string };
   profile_details: {
     companion_name?: string;

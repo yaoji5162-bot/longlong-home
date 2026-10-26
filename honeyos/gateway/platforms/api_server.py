@@ -2419,6 +2419,7 @@ class APIServerAdapter(BasePlatformAdapter):
             messages.append(
                 {
                     "role": item["role"],
+                    "timestamp": item.get("timestamp"),
                     "content": (
                         _resolve_media_to_data_urls(display_content)
                         if item["role"] == "assistant"
@@ -2529,8 +2530,11 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug("Failed to read companion distillation model", exc_info=True)
 
+        from honeyos.companion.time_context import companion_timezone
+
         return web.json_response(
             {
+                "timezone": str(companion_timezone()),
                 "profile": companion_profile(home),
                 "profile_details": {
                     "companion_name": managed_profile.companion_name,
@@ -7798,6 +7802,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # run_in_executor threads, so the profile scope must be re-entered
         # inside _run() from this explicit value.
         request_profile = _api_request_profile.get()
+        received_at = time.time()
 
         def _run():
             from honeyos.gateway.session_context import clear_session_vars
@@ -7849,6 +7854,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         user_message=user_message,
                         conversation_history=conversation_history,
                         task_id=effective_task_id,
+                        persist_user_timestamp=received_at,
                     )
                     usage = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,

@@ -1,6 +1,6 @@
 import { ArrowDownIcon, ArrowUpIcon, ImageIcon, PlusIcon, StopIcon, XIcon } from "@phosphor-icons/react";
 import { useMutation } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode, Fragment } from "react";
 import { Link } from "react-router-dom";
 
 import { answerApproval, streamChat, type ChatInput } from "../../api/chat";
@@ -12,6 +12,7 @@ import { Button } from "../../components/ui/Button";
 import type { PermissionChoice } from "../../runtime/honey-events";
 import { useHoneyStore } from "../../runtime/honey-store";
 import { HoneyRun } from "./HoneyRun";
+import { MessageTime, timeLabels } from "../../components/honey/MessageTime";
 
 type ChatAttachment = { id: string; name: string; dataUrl: string };
 
@@ -66,7 +67,7 @@ function retryInput(display: string): ChatInput {
 
 export function ChatPage() {
   const {
-    loading, error, messages, name, status, sessionId, sessionKey, run, sending,
+    loading, error, messages, name, status, sessionId, sessionKey, run, sending, timezone, replyTimestamp,
     beginTurn, applyRunEvent, finishTurn, failTurn, startConversation,
   } = useHoneyStore();
   const [draft, setDraft] = useState("");
@@ -199,13 +200,18 @@ export function ChatPage() {
           <div className="mx-auto flex min-h-full w-full max-w-[56rem] flex-col justify-end gap-5">
         {visible.length ? (
           visible.map((message, index) => (
-            message.role === "assistant" ? (
+            <Fragment key={`${message.role}-${index}`}>
+            {timeLabels(message.timestamp, timezone) && timeLabels(message.timestamp, timezone)?.day !== timeLabels(visible[index - 1]?.timestamp, timezone)?.day && (
+              <div className="text-center text-xs text-[var(--foreground-faint)]">{timeLabels(message.timestamp, timezone)?.day}</div>
+            )}
+            {message.role === "assistant" ? (
               <AssistantTurn key={`${message.role}-${index}`} name={name}>
                 <HoneyMessage
                   content={message.content}
                   role={message.role}
                   messageId={`${message.role}-${index}`}
                 />
+                <MessageTime timestamp={message.timestamp} timezone={timezone} />
               </AssistantTurn>
             ) : (
               <article key={`${message.role}-${index}`} className="ml-auto flex max-w-[92%] items-start gap-2 text-[15px] leading-7 sm:max-w-[78%]">
@@ -216,10 +222,12 @@ export function ChatPage() {
                     role={message.role}
                     messageId={`${message.role}-${index}`}
                   />
+                  <MessageTime timestamp={message.timestamp} timezone={timezone} />
                 </div>
                 <HoneyAvatar name="你" surface="user" className="mt-1 size-8 rounded-full text-xs" />
               </article>
-            )
+            )}
+            </Fragment>
           ))
         ) : (
           <div className="max-w-md py-16 pl-11">
@@ -228,6 +236,10 @@ export function ChatPage() {
           </div>
         )}
         {run.phase !== "idle" ? (
+          <Fragment>
+          {timeLabels(replyTimestamp, timezone) && timeLabels(replyTimestamp, timezone)?.day !== timeLabels(visible.at(-1)?.timestamp, timezone)?.day && (
+            <div className="text-center text-xs text-[var(--foreground-faint)]">{timeLabels(replyTimestamp, timezone)?.day}</div>
+          )}
           <AssistantTurn name={name} live>
             <HoneyRun
               run={run}
@@ -237,7 +249,9 @@ export function ChatPage() {
                 ? () => void runMessage(visible.at(-1)!.content, retryInput(visible.at(-1)!.content))
                 : undefined}
             />
+            <MessageTime timestamp={replyTimestamp} timezone={timezone} />
           </AssistantTurn>
+          </Fragment>
         ) : null}
           </div>
         </div>

@@ -371,6 +371,29 @@ def build_turn_context(
     if recovered_history is not None:
         conversation_history = recovered_history
 
+    # Capture before compression; only real companion user turns receive a clock.
+    _companion_time_note = ""
+    import os as _time_os
+    if (_time_os.environ.get("HONEYOS_RUNTIME_ID", "").startswith("honeyos-companion-")
+            and not persist_user_display_kind
+            and not getattr(agent, "_parent_session_id", None)
+            and getattr(agent, "_chat_type", None) not in {"group", "channel", "supergroup"}
+            and not (isinstance(user_message, str)
+                     and user_message.startswith("[HoneyOS proactive topic seed;"))):
+        try:
+            from datetime import datetime as _clock_datetime
+            from honeyos.companion.time_context import build_time_note, companion_timezone
+            _clock_now = _clock_datetime.now(companion_timezone())
+            _companion_time_note = build_time_note(
+                conversation_history, current=_clock_now, received=persist_user_timestamp)
+            if persist_user_timestamp is None:
+                persist_user_timestamp = _clock_now.timestamp()
+            if isinstance(user_message, list) and persist_user_message is None:
+                from copy import deepcopy
+                persist_user_message = deepcopy(user_message)
+        except Exception:
+            logger.debug("Companion clock unavailable", exc_info=True)
+
     # NOTE: the DB session row is created later, AFTER the system prompt is
     # restored/built (see _ensure_db_session() below the system-prompt block).
     # Creating it here — before _cached_system_prompt is populated — inserts a
@@ -573,6 +596,8 @@ def build_turn_context(
         if persist_user_display_metadata:
             user_msg["display_metadata"] = persist_user_display_metadata
 
+    if _companion_time_note:
+        user_msg.setdefault("timestamp", persist_user_timestamp)
     messages.append(user_msg)
     current_turn_user_idx = len(messages) - 1
     agent._persist_user_message_idx = current_turn_user_idx
@@ -1124,6 +1149,8 @@ def build_turn_context(
     # Multimodal (list) content can't take the string sidecar — append a
     # durable text part instead of dropping the fact.
     _gateway_notes = consume_gateway_turn_context_notes(agent)
+    if _companion_time_note:
+        _gateway_notes = "\n\n".join(filter(None, (_gateway_notes, _companion_time_note)))
     if _gateway_notes:
         _gw_turn_content = (
             messages[current_turn_user_idx].get("content")

@@ -6,6 +6,8 @@ import { reduceHoneyRun } from "./run-reducer";
 
 type HoneyRuntimeState = {
   loading: boolean;
+  timezone: string;
+  replyTimestamp?: number;
   error: string | null;
   sessionId: string | null;
   sessionKey: string | null;
@@ -35,6 +37,7 @@ type HoneyRuntimeState = {
 
 export const useHoneyStore = create<HoneyRuntimeState>((set) => ({
   loading: true,
+  timezone: "Asia/Shanghai",
   error: null,
   sessionId: null,
   sessionKey: null,
@@ -51,6 +54,7 @@ export const useHoneyStore = create<HoneyRuntimeState>((set) => ({
   sendError: null,
   hydrate: (data) =>
     set({
+      timezone: data.timezone || "Asia/Shanghai",
       loading: false,
       error: null,
       sessionId: data.session_id,
@@ -72,20 +76,28 @@ export const useHoneyStore = create<HoneyRuntimeState>((set) => ({
       .filter(Boolean)
       .join("\n\n") || state.run.content;
     const committed = state.run.phase === "completed" && priorReply
-      ? [...state.messages, { role: "assistant" as const, content: priorReply }]
+      ? [...state.messages, { role: "assistant" as const, content: priorReply, timestamp: state.replyTimestamp }]
       : state.messages;
     const last = committed.at(-1);
     const messages = state.run.phase === "failed" && last?.role === "user" && last.content === message
       ? committed
-      : [...committed, { role: "user" as const, content: message }];
+      : [...committed, { role: "user" as const, content: message, timestamp: Date.now() / 1000 }];
     return {
       messages,
+      replyTimestamp: undefined,
       run: { ...initialRunState, phase: "present" },
       sending: true,
       sendError: null,
     };
   }),
-  applyRunEvent: (event) => set((state) => ({ run: reduceHoneyRun(state.run, event) })),
+  applyRunEvent: (event) => set((state) => ({
+    run: reduceHoneyRun(state.run, event),
+    ...(event.name === "run.started" && typeof event.payload.ts === "number"
+      ? { messages: state.messages.map((message, index) => index === state.messages.length - 1 && message.role === "user"
+          ? { ...message, timestamp: event.payload.ts as number } : message) } : {}),
+    ...(event.name === "assistant.completed" && typeof event.payload.ts === "number"
+      ? { replyTimestamp: event.payload.ts } : {}),
+  })),
   finishTurn: () => set({ sending: false }),
   failTurn: (message) => set((state) => ({
     sending: false,
